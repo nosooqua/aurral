@@ -132,6 +132,7 @@ export function extractVariants(value: string | null | undefined) {
   return {
     ...variants,
     mixVariant,
+    originalMix: /\boriginal\s+(?:mix|version)\b/u.test(text),
     remixers: mixVariant === "remix" ? remixCredits(rawText) : [],
     monoStereo,
     contentRating,
@@ -181,6 +182,14 @@ export function compareVariantProfiles(
 ) {
   const contradictions = [];
   let score = 0;
+
+  // An explicit original cannot be changed into a remix by an album name
+  // or a filename. Keep unqualified titles eligible for album-inferred
+  // versions, while retaining contradictory original tags as evidence.
+  if ((expected.originalMix && actual.mixVariant) || (actual.originalMix && expected.mixVariant)) {
+    contradictions.push("original-mix");
+    score -= 90;
+  }
 
   for (const name of CONTRADICTION_VARIANTS) {
     if (expected[name] && actual[name]) {
@@ -259,6 +268,7 @@ const MERGEABLE_VARIANT_KEYS: (keyof VariantProfile)[] = [
   ...CONTRADICTION_VARIANTS,
   "remaster",
   "mixVariant",
+  "originalMix",
   "monoStereo",
   "contentRating",
 ];

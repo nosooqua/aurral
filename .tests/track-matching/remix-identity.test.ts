@@ -159,3 +159,79 @@ test("explicit version labels keep year and mix suffix equivalents", () => {
     assert.equal(result.titleSimilarity, 1);
   }
 });
+
+test("explicit original versions override remix album and filename hints", () => {
+  const base = {
+    artists: ["Without Letters"],
+    albumName: "Abundance Supreme Remixes",
+    durationMs: 200000,
+    isrc: "GBKQU2000509",
+  };
+  for (const [expected, offered, filename] of [
+    ["Flicker (Original Mix)", "Flicker (Teatre Remix)", "Flicker (Teatre Remix).flac"],
+    ["Flicker - Original Version", "Flicker (Teatre Remix)", "Flicker (Teatre Remix).flac"],
+    ["Flicker - Teatre Remix", "Flicker (Original Mix)", "Flicker (Teatre Remix).flac"],
+    ["Flicker - Teatre Remix", "Flicker (Teatre Remix)", "Flicker (Original Mix).flac"],
+  ] as const) {
+    const request = { ...base, title: expected };
+    const candidate = { ...base, title: offered, filename, album: base.albumName };
+    const result = verifyDownloadedRecording(request, candidate);
+    assert.equal(result.decision, "no_match", JSON.stringify(result));
+    assert.ok(result.contradictions.includes("original-mix"));
+    assert.equal(decideRecording(request, [candidate]).decision, "skip");
+  }
+  for (const [expected, offered] of [
+    ["Flicker", "Flicker (Teatre Remix)"],
+    ["Flicker (Original Mix)", "Flicker (Original Mix)"],
+    ["Flicker (Original Mix)", "Flicker"],
+  ]) {
+    assert.equal(
+      verifyDownloadedRecording({ ...base, title: expected }, { ...base, title: offered }).decision,
+      "matched",
+    );
+  }
+});
+
+test("original downloaded tags cannot be overruled by remix filenames", async () => {
+  for (const [expected, title, filename] of [
+    ["Flicker (Original Mix)", "Flicker (Teatre Remix)", "Flicker (Teatre Remix)"],
+    ["Flicker - Teatre Remix", "Flicker (Original Mix)", "Flicker (Teatre Remix)"],
+  ] as const) {
+    const metadata: IAudioMetadata = {
+      native: {},
+      quality: { warnings: [] },
+      common: {
+        title,
+        artist: "Without Letters",
+        album: "Abundance Supreme Remixes",
+        track: { no: 1, of: null },
+        disk: { no: 1, of: null },
+        movementIndex: { no: null, of: null },
+        isrc: ["GBKQU2000509"],
+      },
+      format: {
+        trackInfo: [],
+        tagTypes: [],
+        duration: 200,
+        lossless: true,
+        sampleRate: 44100,
+        bitsPerSample: 16,
+        bitrate: 900000,
+      },
+    };
+    const result = await validateDownloadedTrackFile({
+      request: {
+        artistName: "Without Letters",
+        trackName: expected,
+        albumName: "Abundance Supreme Remixes",
+        durationMs: 200000,
+        isrc: "GBKQU2000509",
+      },
+      filePath: `/staging/01 - Without Letters - ${filename}.flac`,
+      source: "soulseek",
+      options: { parseFile: async () => metadata },
+    });
+    assert.equal(result.decision, "CONFLICTED", JSON.stringify(result));
+    assert.ok(result.contradictions?.includes("original-mix"));
+  }
+});
