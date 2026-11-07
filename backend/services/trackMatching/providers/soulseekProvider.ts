@@ -16,6 +16,7 @@ import {
 import type { SearchTrackRequest } from "../trackIdentity.ts";
 import { getNormalizedText } from "../../providers/brainzmashRanking.ts";
 import { groupSoulseekSearchResults } from "../../downloadJobs/trackSearchQueries.ts";
+import { coreTrackTitle, isTrackVersionLabel } from "../titleText.ts";
 
 type SlskdFile = RawCandidate & { file?: string | null; size?: unknown };
 
@@ -233,6 +234,33 @@ function parseFilenameArtistTitle(
   const leading = /^(\d{1,3})(?:\s*[-._)\]]|\s+-\s+)\s*/.exec(raw);
   const leadingTrackNumber = leading ? Number(leading[1]) : null;
   const withoutNumber = leading ? raw.slice(leading[0].length).trim() : raw;
+
+  // Scene filenames encode spaces as underscores and omit the spaces
+  // around the artist separator. Only decode this format after a track
+  // number and an exact known artist anchor, leaving ordinary titles alone.
+  if (leadingTrackNumber != null && known.length && withoutNumber.includes("_")) {
+    const pieces = withoutNumber.split("-");
+    for (let boundary = 1; boundary < pieces.length; boundary += 1) {
+      const artist = pieces.slice(0, boundary).join("-").replace(/_/gu, " ");
+      if (!isKnownArtist(artist)) continue;
+      const title = pieces
+        .slice(boundary)
+        .join("-")
+        .replace(/_/gu, " ")
+        // Some scene releases append an eight-digit fingerprint after the
+        // closing version bracket. It is not part of the recording title.
+        .replace(/([[(])([^()[\]]*)([)\]])-[a-f\d]{8}$/iu, (suffix, open, inner, close) =>
+          isTrackVersionLabel(inner) ? `${open}${inner}${close}` : suffix,
+        )
+        .trim();
+      // A known artist can be the prefix of another hyphenated artist.
+      // This additional filename reading needs the exact requested title,
+      // not fuzzy similarity that could absorb the other artist's suffix.
+      const requestedTitle = getNormalizedText(coreTrackTitle(request.trackName));
+      if (title && requestedTitle && getNormalizedText(coreTrackTitle(title)) === requestedTitle)
+        return { artist, title, matched: true, trackNumber: leadingTrackNumber };
+    }
+  }
   const tryParse = (text: string | null | undefined) => {
     const segments = String(text || "")
       .split(/\s+(?:-|–|—)\s+/)

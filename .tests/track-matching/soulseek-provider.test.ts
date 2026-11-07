@@ -8,6 +8,7 @@ import { test } from "vite-plus/test";
 import assert from "node:assert/strict";
 import {
   buildSourceCandidates,
+  prefilterCandidates,
   usableEvaluationEntries,
 } from "../../backend/services/trackMatching/index.ts";
 
@@ -1010,4 +1011,105 @@ test("a single's own track number does not reject it for an album track request"
     request,
   );
   assert.deepEqual(usableFileNames(misplaced), []);
+});
+
+test("numbered scene filenames preserve artist and remix identity before filtering", async () => {
+  const file =
+    "Without_Letters-Abundance_Supreme_Remixes-PZPOP010-WEB-2020-ENSLAVE/04-without_letters-flicker_(teatre_remix)-a2abde8b.mp3";
+  const request = {
+    artistName: "Without Letters",
+    artistAliases: ["Without Letters", "Teatre"],
+    trackName: "Flicker - Teatre Remix",
+    albumName: "Abundance Supreme Remixes",
+    durationMs: 385809,
+    releaseYear: 2020,
+  };
+  const evaluation = await evaluate(
+    [result({ file, user: "scene-fixture", size: 16000000, bitrate: 320, length: 385 })],
+    request,
+  );
+  const entry = requireFixture(evaluation.evaluations[0]);
+  assert.equal(entry.decision, "verify", JSON.stringify(entry));
+  assert.equal(entry.candidate.filenameTitle, "flicker (teatre remix)");
+  assert.deepEqual(entry.candidate.artists, ["without letters"]);
+  assert.equal(entry.candidate.trackNumber, 4);
+  assert.equal(entry.candidate.raw.file, file);
+  assert.equal(entry.aurralEvidence.folder?.plausible, true);
+  assert.equal(
+    prefilterCandidates({ source: "soulseek", request, candidates: evaluation.candidates })[0]
+      ?.rejected,
+    false,
+  );
+  for (const filename of [
+    "04-without_letters-flicker_(other_remix)-a2abde8b.mp3",
+    "04-without_letters-flicker_(original_mix)-a2abde8b.mp3",
+    "04-another_artist-flicker_(teatre_remix)-a2abde8b.mp3",
+  ]) {
+    const rejected = await evaluate(
+      [
+        result({
+          file: `${file.slice(0, file.lastIndexOf("/"))}/${filename}`,
+          user: "scene-fixture",
+          size: 16000000,
+          bitrate: 320,
+          length: 385,
+        }),
+      ],
+      request,
+    );
+    assert.equal(rejected.evaluations[0]?.decision, "reject", filename);
+  }
+});
+
+test("scene parsing retains meaningful subtitles and hashes outside bracketed suffixes", async () => {
+  const request = {
+    artistName: "Artist Name",
+    trackName: "Song",
+    albumName: "Album",
+    durationMs: 200000,
+  };
+  for (const [filename, parsedTitle] of [
+    [
+      "01-artist_name-song_(where_we_begin)-a2abde8b.mp3",
+      "artist_name-song_(where_we_begin)-a2abde8b",
+    ],
+    ["01-artist_name-song-a2abde8b.mp3", "artist_name-song-a2abde8b"],
+    ["01-artist_name-song_(part_ii)-nonhexid.mp3", "artist_name-song_(part_ii)-nonhexid"],
+    ["Artist Name - Song (Part II) - a2abde8b.mp3", "Song (Part II) - a2abde8b"],
+  ] as const) {
+    const evaluation = await evaluate(
+      [result({ file: `Artist Name/Album/${filename}`, user: "scene-fixture", length: 200 })],
+      request,
+    );
+    const entry = requireFixture(evaluation.evaluations[0]);
+    assert.equal(entry.candidate.filenameTitle, parsedTitle);
+    assert.equal(entry.decision, "reject", filename);
+  }
+});
+
+test("scene artist anchors cannot consume the prefix of another artist", async () => {
+  const request = {
+    artistName: "Foo",
+    trackName: "Everything In Its Right Place - Teatre Remix",
+    albumName: "Some Album",
+    durationMs: 200000,
+  };
+  const file =
+    "Foo-Bar/Some Album/01-foo-bar-everything_in_its_right_place_(teatre_remix)-a2abde8b.mp3";
+  const evaluation = await evaluate(
+    [result({ file, user: "scene-fixture", bitrate: 320, length: 200 })],
+    request,
+  );
+  const entry = requireFixture(evaluation.evaluations[0]);
+  assert.equal(entry.decision, "reject", JSON.stringify(entry));
+  assert.deepEqual(entry.candidate.artists, []);
+  assert.equal(
+    entry.candidate.filenameTitle,
+    "foo-bar-everything_in_its_right_place_(teatre_remix)-a2abde8b",
+  );
+  assert.equal(
+    prefilterCandidates({ source: "soulseek", request, candidates: evaluation.candidates })[0]
+      ?.rejected,
+    true,
+  );
 });

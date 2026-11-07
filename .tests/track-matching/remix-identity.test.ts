@@ -271,3 +271,21 @@ test("artist aliases cannot erase explicit remix author identity", () => {
     assert.ok(!semantic.candidateVariants.remixers.includes(""));
   }
 });
+
+test("underscore remix credits retain the author independently of artist aliases", () => {
+  const request = {
+    trackName: "Song - First DJ Remix",
+    artistName: "Artist",
+    artistAliases: ["First DJ"],
+  };
+  for (const [filename, accepted] of [
+    ["01-artist-song_(first_dj_remix)-a2abde8b.mp3", true],
+    ["01-artist-song_(other_dj_remix)-a2abde8b.mp3", false],
+    ["01-artist-song_(remix)-a2abde8b.mp3", false],
+    ["01-artist-song_(original_mix)-a2abde8b.mp3", false],
+  ] as const) {
+    const result = checkVariantCompatibility(request, { filename });
+    assert.equal(result.compatible, accepted, JSON.stringify(result));
+    if (accepted) assert.deepEqual(result.candidateVariants.remixers, ["first dj"]);
+  }
+});

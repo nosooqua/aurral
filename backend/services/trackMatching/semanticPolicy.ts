@@ -83,7 +83,9 @@ function normalizeVariantText(value: string | null | undefined) {
 }
 
 function remixCredits(value: string, { explicitOnly = false } = {}) {
-  const groups = normalizeTitleTypography(value).split(/[()[\]{}]|\s+-\s+/u);
+  const groups = normalizeTitleTypography(value)
+    .replace(/_/gu, " ")
+    .split(/[()[\]{}]|\s+-\s+/u);
   return [
     ...new Set(
       groups.flatMap((group, index) => {
