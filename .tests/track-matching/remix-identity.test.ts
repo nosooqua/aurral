@@ -23,7 +23,14 @@ const examples = [
 
 for (const [artist, expected, offered, album] of examples) {
   test(`same remix survives listing and original-tag validation: ${expected}`, async () => {
-    const request = { title: expected, artists: [artist], durationMs: 200000, albumName: album };
+    const artistAliases = [artist, "Teatre", "nowifi"];
+    const request = {
+      title: expected,
+      artists: [artist],
+      artistAliases,
+      durationMs: 200000,
+      albumName: album,
+    };
     const candidate = { title: offered, artists: [artist], durationMs: 200000, album };
     assert.equal(decideRecording(request, [candidate]).decision, "selectable");
     const verified = verifyDownloadedRecording(request, candidate);
@@ -54,6 +61,7 @@ for (const [artist, expected, offered, album] of examples) {
     const result = await validateDownloadedTrackFile({
       request: {
         artistName: artist,
+        artistAliases,
         trackName: expected,
         albumName: album,
         durationMs: 200000,
@@ -233,5 +241,33 @@ test("original downloaded tags cannot be overruled by remix filenames", async ()
     });
     assert.equal(result.decision, "CONFLICTED", JSON.stringify(result));
     assert.ok(result.contradictions?.includes("original-mix"));
+  }
+});
+
+test("artist aliases cannot erase explicit remix author identity", () => {
+  const request = {
+    title: "Flicker - Teatre Remix",
+    artists: ["Without Letters"],
+    artistAliases: ["Without Letters", "Teatre"],
+    albumName: "Abundance Supreme Remixes",
+    durationMs: 385809,
+  };
+  for (const [title, expected] of [
+    ["Flicker (Teatre Remix)", "matched"],
+    ["Flicker - Teatre Remix", "matched"],
+    ["Flicker (Other Remix)", "no_match"],
+    ["Flicker (Remix)", "no_match"],
+    ["Flicker", "no_match"],
+  ] as const) {
+    const candidate = { title, artists: ["Without Letters"], durationMs: 385809 };
+    const result = verifyDownloadedRecording(request, candidate);
+    assert.equal(result.decision, expected, JSON.stringify(result));
+    assert.equal(
+      decideRecording(request, [candidate]).decision,
+      expected === "matched" ? "selectable" : "skip",
+    );
+    const semantic = checkVariantCompatibility(request, candidate);
+    assert.deepEqual(semantic.expectedVariants.remixers, ["teatre"]);
+    assert.ok(!semantic.candidateVariants.remixers.includes(""));
   }
 });

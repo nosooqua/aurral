@@ -82,19 +82,29 @@ function normalizeVariantText(value: string | null | undefined) {
     .trim();
 }
 
-function remixCredits(value: string) {
+function remixCredits(value: string, { explicitOnly = false } = {}) {
   const groups = normalizeTitleTypography(value).split(/[()[\]{}]|\s+-\s+/u);
   return [
     ...new Set(
-      groups.flatMap((group) => {
+      groups.flatMap((group, index) => {
+        if (explicitOnly && index === 0) return [];
         const credit = /^(.*?)\b(?:remix|rmx)\b/iu.exec(group)?.[1]?.trim();
         if (!credit) return [];
         const name = normalizeVariantText(credit);
+        if (!name) return [];
         // These describe the mix, not its author.
         return /^(?:extended|radio|club|dance|official|original|single)$/u.test(name) ? [] : [name];
       }),
     ),
   ];
+}
+
+// Artist aliases can include the remixer. Read an explicitly separated
+// remix credit before removing those aliases from version-detection text.
+// Unseparated release labels still need artist/title names removed first.
+function preservedRemixCredits(value: string, names: string[]) {
+  const explicit = remixCredits(value, { explicitOnly: true });
+  return explicit.length ? explicit : remixCredits(withoutNames(value, names));
 }
 
 export function extractVariants(value: string | null | undefined) {
@@ -699,6 +709,9 @@ export function prepareVariantRequest(request: VariantRequest | null): PreparedV
     ...request,
     trackName: requested.trackName.map((name) => withoutNames(name, requested.names)).join(" "),
   });
+  expected.remixers = requested.trackName.flatMap((name) =>
+    preservedRemixCredits(name, requested.names),
+  );
   const allowed = allowedVariants(expected, requested);
   return {
     requested,
@@ -716,12 +729,15 @@ export function checkVariantCompatibility(
   labels: Map<string, string[][] | null> = new Map(),
 ) {
   const { requested, expected, allowed } = prepared;
-  const candidateText = [candidate?.title, candidate?.filename]
-    .filter(Boolean)
-    .map((text) => withoutNames(text, requested.names))
-    .join(" ");
+  const candidateNames = [candidate?.title, candidate?.filename].filter((name): name is string =>
+    Boolean(name),
+  );
+  const candidateText = candidateNames.map((text) => withoutNames(text, requested.names)).join(" ");
   const actual = mergeVariantProfiles(
-    extractVariants(candidateText),
+    {
+      ...extractVariants(candidateText),
+      remixers: candidateNames.flatMap((name) => preservedRemixCredits(name, requested.names)),
+    },
     candidate?.variants && typeof candidate.variants === "object" ? candidate.variants : null,
   );
   const compared = compareVariantProfiles(expected, actual, allowed);
