@@ -30,6 +30,10 @@ test("stripVersionSuffix removes trailing version descriptors only", () => {
   assert.equal(stripVersionSuffix("Back in Black - Live"), "Back in Black");
   assert.equal(stripVersionSuffix("Highway - Star City"), "Highway - Star City");
   assert.equal(stripVersionSuffix("Teardrop"), "Teardrop");
+  assert.equal(stripVersionSuffix("Baller - nowifi Remix"), "Baller");
+  assert.equal(stripVersionSuffix("Flicker — Teatre Remix"), "Flicker");
+  assert.equal(stripVersionSuffix("Всё просто (RMX)"), "Всё просто");
+  assert.equal(stripVersionSuffix("Song (Part Two)"), "Song (Part Two)");
 });
 
 test("buildTrackSearchTiers starts with the artist and album and keeps the wildcard fallback", () => {
@@ -121,6 +125,37 @@ test("buildTrackSearchTiers asks each query once", () => {
 
   assert.ok(queries.includes("Massive Attack Teardrop"));
   assert.equal(new Set(queries.map((query: string) => query.toLowerCase())).size, queries.length);
+});
+
+test("Soulseek remix fallbacks keep the original request and ask the core title once", () => {
+  const request = Object.freeze({
+    artistName: "Антоха МС",
+    albumName: "Всё просто (RMX)",
+    trackName: "Всё просто (RMX)",
+  });
+  const tiers = buildTrackSearchTiers(request);
+  const queries = tiers.flatMap((tier) => tier.queries);
+  assert.deepEqual(tiers[0]?.queries, ["Антоха МС Всё просто RMX"]);
+  assert.deepEqual(tiers.find((tier) => tier.name === "primary_track")?.queries, [
+    "Антоха МС Всё просто",
+  ]);
+  assert.equal(new Set(queries.map((query) => query.toLowerCase())).size, queries.length);
+  assert.equal(request.trackName, "Всё просто (RMX)");
+});
+
+test("Soulseek broadens named remixes but preserves meaningful parenthetical titles", () => {
+  for (const trackName of ["Baller - nowifi Remix", "Baller (nowifi Remix)"]) {
+    const queries = buildTrackSearchTiers({ artistName: "Abor & Tynna", trackName }).flatMap(
+      (tier) => tier.queries,
+    );
+    assert.deepEqual(queries.slice(0, 2), ["Abor Tynna Baller nowifi Remix", "Abor Tynna Baller"]);
+  }
+  const queries = buildTrackSearchTiers({
+    artistName: "Band",
+    trackName: "Song (Part Two)",
+  }).flatMap((tier) => tier.queries);
+  assert.ok(queries.includes("Band Song Part Two"));
+  assert.ok(!queries.includes("Band Song"));
 });
 
 test("selectRankedMatchAttempts spreads early attempts across users before reusing one", () => {

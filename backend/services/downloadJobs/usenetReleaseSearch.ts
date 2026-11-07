@@ -15,7 +15,9 @@ import {
 } from "../providers/brainzmashRanking.ts";
 import {
   coreAlbumTitle,
+  coreTrackTitle,
   isVariousArtistsCredit,
+  normalizeTitleTypography,
   otherProductMarker,
   withoutFeaturedArtists,
 } from "../trackMatching/titleText.ts";
@@ -142,8 +144,9 @@ function releaseKey(release: UsenetRelease) {
 }
 
 function titleWords(value: string) {
-  return foldDiacritics(String(value || ""))
+  return foldDiacritics(normalizeTitleTypography(value))
     .toLowerCase()
+    .replace(/ё/gu, "е")
     .replace(/&/gu, " and ")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim()
@@ -188,7 +191,7 @@ function containsAlbumApartFromArtist(words: string[], album: string, artists: s
 }
 
 function withoutCredits(title: string) {
-  return withoutFeaturedArtists(String(title || "").replace(/\s*[[(][^\])]*[\])]/gu, " "));
+  return withoutFeaturedArtists(coreTrackTitle(title));
 }
 
 function readReleaseRequest(context: UsenetSearchContext) {
@@ -266,26 +269,30 @@ export function rankUsenetReleases(
     // track is not downloaded for the original, nor an acoustic album for the
     // album. Every version word in the title counts, however it is noted,
     // unless the request names it; an album is not asked for its tracks'.
-    const otherVersion =
-      labelContradictions(title, hasAlbum ? albumVersions : trackVersions).length > 0 ||
-      (hasTrack && !checkVariantCompatibility(null, { title }, trackVersions).compatible);
+    const versionContradictions = [
+      ...labelContradictions(title, hasAlbum ? albumVersions : trackVersions),
+      ...(hasTrack ? checkVariantCompatibility(null, { title }, trackVersions).contradictions : []),
+    ];
     const otherProduct = otherProductMarker(
       title,
       [request.albumName, request.trackName, ...request.artists],
       { album: hasAlbum },
     );
-    const admissible =
-      hasAudioCategory(release) &&
-      hasArtist &&
-      (hasAlbum || hasTrack) &&
-      !otherVersion &&
-      !otherProduct;
+    const rejectionReasons = [
+      ...(!hasAudioCategory(release) ? ["category"] : []),
+      ...(!hasArtist ? ["artist"] : []),
+      ...(!hasAlbum && !hasTrack ? ["base_title"] : []),
+      ...new Set(versionContradictions.map((reason) => `version:${reason}`)),
+      ...(otherProduct ? [`product:${otherProduct}`] : []),
+    ];
+    const admissible = rejectionReasons.length === 0;
     if (!admissible) {
       ranked.push({
         raw,
         score: 0,
         resolvedAlbumName: null,
         releaseAdmissible: false,
+        rejectionReasons,
         scores: {
           artist: hasArtist ? 100 : 0,
           track: hasTrack ? 100 : 0,
@@ -311,6 +318,7 @@ export function rankUsenetReleases(
       score: tieScore,
       resolvedAlbumName: hasAlbum ? request.albumName : null,
       releaseAdmissible: true,
+      rejectionReasons,
       scores: {
         artist: 100,
         track: hasTrack ? 100 : 0,
@@ -355,6 +363,7 @@ export function selectRankedUsenetCandidates(
   }
   for (const candidate of Array.isArray(ranked) ? ranked : []) {
     if (selected.length >= max) break;
+    if (!candidate?.releaseAdmissible) continue;
     const key = releaseKey(candidate.raw?.release);
     if (seenKeys.has(key)) continue;
     seenKeys.add(key);
@@ -379,9 +388,10 @@ export function newznabQueryText(value: string | null | undefined) {
   return text || String(value || "").trim();
 }
 
-// Lidarr's plan: a Newznab music search when an indexer supports it, then
-// one "Artist Album" text search. A track also tries "Artist Title" for a
-// single. A compilation is listed as "VA" or by its title alone.
+// Search breadth never changes the requested recording identity. Track
+// searches try the full title, its version-free title, then the album. An
+// album also gets one Newznab music query when supported. Compilations are
+// listed as "VA" or by their title alone.
 // A compilation track's job names the track's own artist as an alias.
 function creditedArtists(context: UsenetSearchContext) {
   return (context?.artistAliases || [])
@@ -404,17 +414,27 @@ export function buildUsenetSearchQueries(
   const trackArtist = compilation ? newznabQueryText(creditedArtists(context)[0]) : artist;
   const album = context?.albumName ? newznabQueryText(coreAlbumTitle(context.albumName)) : "";
   const track = albumGrab ? "" : newznabQueryText(context?.trackName);
+  const coreTrack = albumGrab ? "" : newznabQueryText(coreTrackTitle(context?.trackName));
   const year =
     album && artist.toLowerCase() === album.toLowerCase() ? getYear(context?.releaseYear) : null;
   const join = (...parts: (string | null)[]) => parts.filter(Boolean).join(" ");
   const queries: string[] = [];
+  if (trackArtist && track) queries.push(join(trackArtist, track));
+  if (trackArtist && coreTrack) queries.push(join(trackArtist, coreTrack));
   if (musicSearch && !compilation && artist && album) {
     queries.push(`{artist:${artist}}{album:${album}}${year ? `{year:${year}}` : ""}`);
   }
   if (artist && album) queries.push(join(artist, album, year));
   if (compilation && album) queries.push(album);
-  if (trackArtist && track) queries.push(join(trackArtist, track));
-  return [...new Set(queries)];
+  const seen = new Set<string>();
+  return queries
+    .filter((query) => {
+      const key = query.toLowerCase().replace(/\s+/gu, " ").trim();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 4);
 }
 
 export function isProwlarrMusicQuery(query: string) {

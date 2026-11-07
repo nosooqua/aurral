@@ -183,6 +183,7 @@ export function buildActualFileCandidate(
       readRecordingMbid(common.musicbrainz_trackid) ||
       null,
     releaseMbid: readTagText(common.musicbrainz_albumid) || null,
+    isrcs: Array.isArray(common.isrc) ? common.isrc : [],
     filename: fileName,
     path: filePath,
     quality: {
@@ -402,6 +403,7 @@ export async function validateDownloadedTrackFile({
       artists: youtube ? youtube.artists : actual.artists,
       durationMs: actualDurationMs,
       recordingMbid: actual.recordingMbid,
+      isrcs: actual.isrcs,
       album: actual.album,
       path: actual.path,
       filename: hasYtdlpIdFilename ? null : actual.filename,
@@ -511,6 +513,10 @@ export async function validateDownloadedTrackFile({
     source,
     stage: "post-download",
     decision,
+    contradictions,
+    evidence: verification.evidence,
+    titleSimilarity: verification.titleSimilarity,
+    artistSimilarity: verification.artistSimilarity,
     durationDiffMs: verification.durationGapMs,
     policyVersion: verification.policyVersion,
   });

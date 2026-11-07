@@ -7,7 +7,11 @@
 
 import { getYear } from "../providers/brainzmashRanking.ts";
 import { getPathParts } from "../trackMatching/candidateNormalizer.ts";
-import { coreAlbumTitle, isVariousArtistsCredit } from "../trackMatching/titleText.ts";
+import {
+  coreAlbumTitle,
+  coreTrackTitle,
+  isVariousArtistsCredit,
+} from "../trackMatching/titleText.ts";
 
 export interface TrackSearchContext {
   artistName?: string | null;
@@ -70,13 +74,6 @@ export function bypassBannedArtistTerm(name: string | null | undefined) {
     .join(" ");
 }
 
-function stripParenthetical(value: string) {
-  return String(value || "")
-    .replace(/\(.*?\)|\[.*?\]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 export function stripReleaseTypeSuffix(value: string | null | undefined) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -89,16 +86,7 @@ export function stripReleaseTypeSuffix(value: string | null | undefined) {
 }
 
 export function stripVersionSuffix(value: string | null | undefined) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const stripped = text
-    .replace(
-      /\s+(?:-|–|—)\s+[^-–—]*\b(?:mix|edit|version|remaster(?:ed)?|radio|extended|instrumental|acoustic|live|demo|mono|stereo)\b[^-–—]*$/i,
-      "",
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-  return stripped || text;
+  return coreTrackTitle(value);
 }
 
 function uniqueQueries(values: Array<string | null | undefined>, limit = 12) {
@@ -121,10 +109,6 @@ function buildTrackQueryVariants(trackName: string | null | undefined) {
   const raw = String(trackName || "").trim();
   if (!raw) return [];
   const variants = [raw];
-  const stripped = stripParenthetical(raw);
-  if (stripped && stripped.toLowerCase() !== raw.toLowerCase()) {
-    variants.push(stripped);
-  }
   const normalized = stripVersionSuffix(raw);
   if (normalized && normalized.toLowerCase() !== raw.toLowerCase()) {
     variants.push(normalized);
@@ -132,7 +116,7 @@ function buildTrackQueryVariants(trackName: string | null | undefined) {
   if (raw.includes("/")) {
     const slashParts = raw
       .split("/")
-      .map((entry) => stripParenthetical(entry))
+      .map((entry) => stripVersionSuffix(entry))
       .filter(Boolean);
     variants.push(...slashParts);
   }
@@ -314,7 +298,6 @@ export function buildAlbumSearchTiers(context: TrackSearchContext) {
 export function buildTrackSearchTiers(context: TrackSearchContext) {
   const ctx = readTrackSearchContext(context);
   const [track, ...trackVariants] = ctx.trackVariants;
-  const strippedTrack = stripVersionSuffix(track);
   const wildcardArtist = bypassBannedArtistTerm(ctx.trackArtist);
   return orderTiers([
     { name: "base_album", queries: [artistAlbumQuery(ctx)] },
@@ -324,7 +307,6 @@ export function buildTrackSearchTiers(context: TrackSearchContext) {
         ctx.trackArtist && track
           ? [
               joinSearchParts(ctx.trackArtist, track),
-              joinSearchParts(ctx.trackArtist, strippedTrack),
               ...trackVariants
                 .slice(0, 1)
                 .map((variant) => joinSearchParts(ctx.trackArtist, variant)),

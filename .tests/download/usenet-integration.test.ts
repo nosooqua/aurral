@@ -21,7 +21,7 @@ const [
   { nzbgetClient },
   { SabnzbdClient, sabnzbdClient, tidarrClient },
   { getEnabledDownloadSources },
-  { rankUsenetReleases, selectRankedUsenetCandidates },
+  { buildUsenetSearchQueries, rankUsenetReleases, selectRankedUsenetCandidates },
   { dbOps },
   { db },
 ] = await setupIsolatedBackend(
@@ -276,7 +276,7 @@ async function searchUntilDone(payload: UsenetPayload) {
   return result;
 }
 
-test("Usenet searches like Lidarr: a music search where supported, then cleaned text", async () => {
+test("Usenet searches for the track, then the album with supported music and cleaned text queries", async () => {
   const requests: { query: string | null; type: string | null; indexerIds: string[] }[] = [];
   const server = await createMockHttpServer((req, res) => {
     const url = new URL(req.url || "/", "http://mock");
@@ -336,9 +336,9 @@ test("Usenet searches like Lidarr: a music search where supported, then cleaned 
     const result = await searchUntilDone({ phase: "search", source: "usenet", jobId });
 
     assert.deepEqual(requests, [
+      { query: "AC DC Hells Bells", type: "search", indexerIds: ["1", "2"] },
       { query: "{artist:AC DC}{album:Back in Black}", type: "music", indexerIds: ["1"] },
       { query: "AC DC Back in Black", type: "search", indexerIds: ["1", "2"] },
-      { query: "AC DC Hells Bells", type: "search", indexerIds: ["1", "2"] },
     ]);
     assert.equal(result.message, "No suitable Usenet search results");
   } finally {
@@ -677,7 +677,7 @@ test("download source selection orders enabled sources by priority", () => {
   );
 });
 
-test("Usenet matcher prefers matching audio releases and keeps fallback candidates", () => {
+test("Usenet matcher only selects admissible audio releases, including its second selection pass", () => {
   const context = {
     artistName: "Example Artist",
     trackName: "Signal Fire",
@@ -711,7 +711,88 @@ test("Usenet matcher prefers matching audio releases and keeps fallback candidat
   assert.equal(ranked[0]?.raw.release.title, "Example Artist - Bright Static (2024) FLAC");
   assert.equal(ranked[0]?.releaseAdmissible, true);
   const selected = selectRankedUsenetCandidates(ranked, 2);
-  assert.equal(selected.length, 2);
+  assert.equal(selected.length, 1);
+});
+
+test("Usenet bounds and deduplicates the full title, core title and album search plan", () => {
+  assert.deepEqual(
+    buildUsenetSearchQueries({
+      artistName: "Антоха МС",
+      trackName: "Всё просто (RMX)",
+      albumName: "Всё просто (RMX)",
+    }),
+    ["Антоха МС Всё просто RMX", "Антоха МС Всё просто"],
+  );
+  assert.deepEqual(
+    buildUsenetSearchQueries({
+      artistName: "Without Letters",
+      trackName: "Flicker - Teatre Remix",
+      albumName: "Abundance Supreme Remixes",
+    }),
+    [
+      "Without Letters Flicker Teatre Remix",
+      "Without Letters Flicker",
+      "Without Letters Abundance Supreme Remixes",
+    ],
+  );
+  assert.deepEqual(
+    buildUsenetSearchQueries({ artistName: "Artist", trackName: "Song", albumName: "SONG" }),
+    ["Artist Song"],
+  );
+  assert.deepEqual(
+    buildUsenetSearchQueries({ artistName: "Artist", trackName: "Song (Part Two)" }),
+    ["Artist Song Part Two"],
+  );
+  assert.equal(
+    buildUsenetSearchQueries(
+      { artistName: "Artist", trackName: "Song (Someone Remix)", albumName: "Album" },
+      { musicSearch: true },
+    ).length,
+    4,
+  );
+});
+
+test("Tidarr continues after nonempty unsuitable results and caches repeated fallback queries", async () => {
+  vi.spyOn(prowlarrClient, "getEnabledUsenetIndexers").mockImplementation(async () => []);
+  const original = releaseFixture({
+    guid: "original",
+    title: "Антоха МС - Всё просто (2025) FLAC",
+    downloadUrl: "https://nzb.invalid/original",
+  });
+  const remix = releaseFixture({
+    guid: "remix",
+    title: "Антоха МС, Muzaferov - Всё просто (RMX) (2026) FLAC 24bit",
+    downloadUrl: "https://nzb.invalid/remix",
+  });
+  const search = vi
+    .spyOn(prowlarrClient, "search")
+    .mockImplementation(async (query) => (query.endsWith("RMX") ? [original] : [original, remix]));
+  try {
+    const jobId = createTrackedJob(
+      downloadTracker,
+      {
+        artistName: "Антоха МС",
+        trackName: "Всё просто (RMX)",
+        albumName: "Всё просто (RMX)",
+        durationMs: 180000,
+      },
+      "usenet-remix-fallback",
+    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await searchUntilDone({ phase: "search", source: "usenet", jobId });
+      assert.equal(result.phase, "download");
+      assert.deepEqual(
+        result.candidates?.map((entry) => entry.raw.guid),
+        ["remix"],
+      );
+    }
+    assert.deepEqual(
+      search.mock.calls.map(([query]) => query),
+      ["Антоха МС Всё просто RMX", "Антоха МС Всё просто"],
+    );
+  } finally {
+    search.mockRestore();
+  }
 });
 
 for (const albumGrab of [false, true]) {
@@ -961,6 +1042,52 @@ function admitted(titles: string[], context: Parameters<typeof rankUsenetRelease
     .filter((entry) => entry.releaseAdmissible)
     .map((entry) => [entry.raw.release.title, entry.resolvedAlbumName ? "album" : "track"]);
 }
+
+test("Usenet requires the requested remix and preserves meaningful parenthesized titles", () => {
+  assert.deepEqual(
+    admitted(
+      [
+        "Антоха МС - Все просто (2025) FLAC",
+        "Антоха МС, Muzaferov - Всё просто (RMX) (2026) FLAC 24bit",
+        "Антоха МС, Muzaferov - Все просто (Remix) (2026) FLAC",
+      ],
+      { artistName: "Антоха МС", trackName: "Всё просто (RMX)", albumName: "Всё просто (RMX)" },
+    )
+      .map(([title]) => title)
+      .sort(),
+    [
+      "Антоха МС, Muzaferov - Все просто (Remix) (2026) FLAC",
+      "Антоха МС, Muzaferov - Всё просто (RMX) (2026) FLAC 24bit",
+    ],
+  );
+
+  for (const [artist, title, remixer] of [
+    ["Abor & Tynna", "Baller", "nowifi"],
+    ["Without Letters", "Flicker", "Teatre"],
+  ] as const) {
+    const wanted = `${artist} - ${title} (${remixer} Remix) (2026) FLAC`;
+    assert.deepEqual(
+      admitted(
+        [
+          wanted,
+          `${artist} - ${title} (Somebody Else Remix) FLAC`,
+          `${artist} - ${title} FLAC`,
+          `${artist} - ${title} (Live) FLAC`,
+        ],
+        { artistName: artist, trackName: `${title} - ${remixer} Remix` },
+      ),
+      [[wanted, "track"]],
+    );
+  }
+
+  assert.deepEqual(
+    admitted(["Artist - Song FLAC", "Artist - Song (Part Two) FLAC"], {
+      artistName: "Artist",
+      trackName: "Song (Part Two)",
+    }),
+    [["Artist - Song (Part Two) FLAC", "track"]],
+  );
+});
 
 test("Usenet release titles match by their words, not by overall similarity", () => {
   const lemonade = admitted(

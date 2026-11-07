@@ -1,5 +1,53 @@
 export const VARIOUS_ARTISTS_MBID = "89ad4ac3-39f7-470e-963a-56509c546377";
 
+// Typography does not identify a different recording. Preserve spelling
+// here because search providers may still distinguish е from ё.
+export function normalizeTitleTypography(value: string | null | undefined) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[‐‑‒–—―−]/gu, "-")
+    .replace(/[‘’ʼʻ`´]/gu, "'")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+// Only explicit version labels are removable. In particular, a lyric or
+// subtitle in parentheses remains part of the title.
+export function isTrackVersionLabel(value: string) {
+  const text = normalizeTitleTypography(value).toLowerCase();
+  return (
+    /\b(?:remix|rmx|rework(?:ed)?|bootleg|mash[ -]?up)(?:\s+(?:edit|mix|version))?$/u.test(text) ||
+    /\bremaster(?:ed)?\b/u.test(text) ||
+    /^(?:live(?:\s+(?:(?:at|from|in|on|version|recording|session)\b.*|\d{4}|mix))?|concert|(?:acoustic|instrumental|karaoke|demo)(?:\s+(?:version|mix))?|rehearsal|nightcore|sped[ -]+up|slowed(?:\s.*)?|8d audio)$/u.test(
+      text,
+    ) ||
+    /\bunplugged\b/u.test(text) ||
+    /\bbonus track$/u.test(text) ||
+    /^(?:19|20)\d{2}\s+mix$/u.test(text) ||
+    /^(?:(?:radio|single|extended|club|dance|album|original|alternate|alternative|mono|stereo)\s+)?(?:edit|mix|version)$/u.test(
+      text,
+    ) ||
+    /^(?:mono|stereo|bonus(?: track)?|hidden track|clean(?: version)?|explicit(?: version)?)$/u.test(
+      text,
+    ) ||
+    /^(?:feat\.?|ft\.?|featuring)\s/u.test(text)
+  );
+}
+
+export function coreTrackTitle(value: string | null | undefined) {
+  const title = normalizeTitleTypography(value);
+  const core = title
+    .replace(/[([]([^)\]]*)[)\]]/gu, (group, inner: string) =>
+      isTrackVersionLabel(inner) ? " " : group,
+    )
+    .replace(/\s+-\s+((?:(?!\s+-\s+).)+)$/u, (suffix, inner: string) =>
+      isTrackVersionLabel(inner) ? " " : suffix,
+    )
+    .replace(/\s+/gu, " ")
+    .trim();
+  return core || title;
+}
+
 const VARIOUS_ARTISTS_NAMES = new Set(["various artists", "various", "va", "v a"]);
 const EDITION_WORDS =
   /\b(?:deluxe|edition|remaster(?:ed)?|expanded|anniversary|bonus|special|collector'?s|version|explicit|clean|reissue|mono|stereo)\b/iu;

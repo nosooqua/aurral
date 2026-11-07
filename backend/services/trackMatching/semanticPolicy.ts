@@ -1,6 +1,12 @@
 import { getPathParts } from "./candidateNormalizer.ts";
 import { foldDiacritics } from "../providers/brainzmashRanking.ts";
-import { coreAlbumTitle, discFolderNumber, isReleaseNoiseWord } from "./titleText.ts";
+import {
+  coreAlbumTitle,
+  coreTrackTitle,
+  discFolderNumber,
+  isReleaseNoiseWord,
+  normalizeTitleTypography,
+} from "./titleText.ts";
 
 // Aurral-owned semantic variant policy.
 //
@@ -22,7 +28,7 @@ const MIX_VARIANT_PATTERNS = [
   {
     value: "remix",
     pattern:
-      /\b(?:remix|rework(?:ed)?|bootleg|vip\s?(?:mix|edit)|mash\s?-?\s?up|workout\s+mix|mix\s?(?:2024|20\d\d))\b/,
+      /\b(?:remix|rmx|rework(?:ed)?|bootleg|vip\s?(?:mix|edit)|mash\s?-?\s?up|workout\s+mix|mix\s?(?:2024|20\d\d))\b/,
   },
   {
     value: "alternate_mix",
@@ -34,7 +40,7 @@ const VARIANT_PATTERNS = [
   {
     value: "live",
     pattern:
-      /\(\s*live\b[^)]*\)|\[\s*live\b[^\]]*\]|\b(?:live at|live from|live version|live recording|live session)\b|(?:\s-|\s–)\s*live\b/i,
+      /\(\s*live\b[^)]*\)|\[\s*live\b[^\]]*\]|\b(?:live at|live from|live version|live recording|live session)\b|(?:^|\s)[-–]\s*live\b/i,
   },
   { value: "concert", pattern: /\b(?:concert|in\s+concert)\b/i },
   { value: "acoustic", pattern: /\b(?:acoustic(?:\s+version)?|unplugged)\b/i },
@@ -67,16 +73,32 @@ const NOISE_PATTERNS = [
 ];
 
 function normalizeVariantText(value: string | null | undefined) {
-  return String(value || "")
+  return normalizeTitleTypography(value)
     .toLowerCase()
+    .replace(/ё/gu, "е")
     .replace(/&/g, " and ")
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
+function remixCredits(value: string) {
+  const groups = normalizeTitleTypography(value).split(/[()[\]{}]|\s+-\s+/u);
+  return [
+    ...new Set(
+      groups.flatMap((group) => {
+        const credit = /^(.*?)\b(?:remix|rmx)\b/iu.exec(group)?.[1]?.trim();
+        if (!credit) return [];
+        const name = normalizeVariantText(credit);
+        // These describe the mix, not its author.
+        return /^(?:extended|radio|club|dance|official|original|single)$/u.test(name) ? [] : [name];
+      }),
+    ),
+  ];
+}
+
 export function extractVariants(value: string | null | undefined) {
-  const rawText = String(value || "");
+  const rawText = normalizeTitleTypography(value);
   const text = normalizeVariantText(rawText);
   const variants: VariantFlags = {
     live: false,
@@ -110,6 +132,7 @@ export function extractVariants(value: string | null | undefined) {
   return {
     ...variants,
     mixVariant,
+    remixers: mixVariant === "remix" ? remixCredits(rawText) : [],
     monoStereo,
     contentRating,
   };
@@ -184,7 +207,17 @@ export function compareVariantProfiles(
     contradictions.push(actual.mixVariant);
     score -= 90;
   } else if (expected.mixVariant) {
-    score -= 20;
+    contradictions.push(expected.mixVariant);
+    score -= 90;
+  }
+
+  if (
+    expected.remixers.length > 0 &&
+    (actual.remixers.length === 0 ||
+      actual.remixers.some((name) => !expected.remixers.includes(name)))
+  ) {
+    contradictions.push("remixer");
+    score -= 90;
   }
 
   // Album titles rarely say which mix they are, so an unrequested "Mono"
@@ -327,7 +360,7 @@ const LABEL_VERSIONS: [string, RegExp][] = [
   ["eight_d", / 8d ?audio /u],
   [
     "remix",
-    / (?:remix(?:es|ed)?|rework(?:ed)?|bootleg|mash ?ups?|vip (?:mix|edit)|workout mix(?:es)?|mix 20\d\d) /u,
+    / (?:remix(?:es|ed)?|rmx|rework(?:ed)?|bootleg|mash ?ups?|vip (?:mix|edit)|workout mix(?:es)?|mix 20\d\d) /u,
   ],
 ];
 
@@ -482,7 +515,7 @@ function namePattern(name: string) {
 // name, not a version, so its first appearance is taken out of the offered
 // text before looking for versions. A second "Live" is still a version.
 function withoutNames(text: string | null | undefined, names: string[]) {
-  let rest = String(text || "");
+  let rest = normalizeTitleTypography(text).replace(/ё/giu, "е");
   let lower = rest.toLowerCase();
   for (const name of names) {
     const entry = namePattern(name);
@@ -696,40 +729,6 @@ export function checkVariantCompatibility(
   };
 }
 
-// Words inside a parenthesized/bracketed group that mark the group as a
-// version descriptor rather than part of the work's title.
-const DESCRIPTOR_GROUP_WORDS = new Set([
-  "live",
-  "concert",
-  "acoustic",
-  "instrumental",
-  "karaoke",
-  "demo",
-  "cover",
-  "sped",
-  "up",
-  "slowed",
-  "reverb",
-  "nightcore",
-  "8d",
-  "remaster",
-  "remastered",
-  "remix",
-  "rework",
-  "bootleg",
-  "mashup",
-  "radio",
-  "single",
-  "extended",
-  "club",
-  "mono",
-  "stereo",
-  "rehearsal",
-  "version",
-  "edit",
-  "mix",
-]);
-
 // Groups that carry no identity information at all (uploader/label noise).
 const PROMO_GROUP_WORDS = new Set([
   "official",
@@ -756,13 +755,6 @@ function groupWords(inner: string) {
   return normalizeVariantText(inner).split(" ").filter(Boolean);
 }
 
-function isDescriptorGroup(inner: string) {
-  // "Live at Wembley" or "2011 Remaster" carry extra words next to the
-  // descriptor, so a single descriptor word is enough to classify the group.
-  const words = groupWords(inner);
-  return words.some((word) => DESCRIPTOR_GROUP_WORDS.has(word));
-}
-
 export function isPromoGroup(inner: string) {
   const words = groupWords(inner);
   return words.length > 0 && words.every((word) => PROMO_GROUP_WORDS.has(word));
@@ -782,13 +774,5 @@ export function getCoreTitle(value: string | null | undefined) {
   // Leading track numbers ("07. Song", "01 - Song"). A bare space after the
   // number is not enough, so numeric artist names ("50 Cent") survive.
   text = text.replace(/^\d{1,3}(?:\s*[-._)\]]|\s+-\s+)\s*/, "");
-  text = text.replace(/[([]([^)\]]*)[)\]]/g, (group, inner) =>
-    isDescriptorGroup(inner) ? " " : group,
-  );
-  // Trailing dash-separated descriptors: "Song - Live at Wembley",
-  // "Song - Radio Edit", "Song - 2011 Remaster".
-  text = text.replace(/\s+(?:-|–|—)\s+[^-–—]*$/, (suffix) =>
-    isDescriptorGroup(suffix.replace(/\s+(?:-|–|—)\s+/, "")) ? " " : suffix,
-  );
-  return text.replace(/\s+/g, " ").trim() || String(value || "").trim();
+  return coreTrackTitle(text) || normalizeTitleTypography(value);
 }

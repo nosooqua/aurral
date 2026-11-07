@@ -230,6 +230,43 @@ test("tracks from one album reuse the album search", async (t) => {
   assert.match(candidateFile(secondResult.next.candidates[0]), /Second\.flac$/);
 });
 
+test("a Soulseek remix search falls back after original-only results and reuses both queries", async (t) => {
+  const request = {
+    artistName: "Антоха МС",
+    albumName: "Всё просто (RMX)",
+    trackName: "Всё просто (RMX)",
+    durationMs: 200000,
+  };
+  const { created } = mockSearch(t, [
+    {
+      state: "Completed, Succeeded",
+      fileCount: 3,
+      responses: folderResponses(request.artistName, request.albumName, ["Всё просто"]),
+    },
+    {
+      state: "Completed, Succeeded",
+      fileCount: 3,
+      responses: folderResponses(request.artistName, request.albumName, [request.trackName]),
+    },
+  ]);
+  const jobId = createTrackedJob(downloadTracker, request, "library");
+  const result = await runToDownload({ phase: "search", source: "slskd", jobId });
+  assert.equal(result.next?.phase, "download");
+  assert.deepEqual(
+    created.mock.calls.map(([query]) => query),
+    ["Антоха МС Всё просто RMX", "Антоха МС Всё просто"],
+  );
+  assert.ok(result.next?.candidates?.length);
+  assert.ok(
+    result.next.candidates.every((candidate) => candidateFile(candidate).includes("(RMX)")),
+  );
+
+  const repeatedJobId = createTrackedJob(downloadTracker, request, "library");
+  const repeated = await runToDownload({ phase: "search", source: "slskd", jobId: repeatedJobId });
+  assert.equal(repeated.next?.phase, "download");
+  assert.equal(created.mock.calls.length, 2);
+});
+
 test("a failed Soulseek poll moves on to the next query", async () => {
   let searchCount = 0;
   const created = vi.spyOn(client, "createSearch").mockImplementation(async (query, options) => {

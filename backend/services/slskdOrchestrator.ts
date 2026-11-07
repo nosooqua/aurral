@@ -263,22 +263,38 @@ export function hasSlskdSearchCandidates(
         .decision === "selectable"
     );
   }
+  return (
+    assessSlskdTrackResults(aggregated, resolvedTrack, searchOptions).eligible.length >=
+    MIN_SEARCH_CANDIDATES
+  );
+}
+
+function assessSlskdTrackResults(
+  aggregated: SoulseekSearchItem[],
+  resolvedTrack: SearchTrackRequest,
+  searchOptions: Partial<SlskdSearchOptions> | undefined,
+) {
   // Node-only pre-filter: no matcher process is spawned during searches.
   // Soulseek folder plausibility is source evidence, not a fuzzy identity
   // score; use it here so an early exit cannot be triggered by unrelated
   // same-format files before the shared title and artist matcher runs.
   const built = buildSoulseekCandidates(aggregated, resolvedTrack, searchOptions);
-  const prefiltered = prefilterCandidates({
+  const assessed = prefilterCandidates({
     request: resolvedTrack,
     source: "soulseek",
     candidates: built.candidates,
-  })
-    .filter(
-      (entry, index) =>
-        !entry.rejected &&
-        built.providerEvidence[index]?.folder?.plausible &&
-        !isDeniedSoulseekFile(entry.candidate.raw, searchOptions?.deniedSourceKeys),
-    )
+  }).map((entry, index) => {
+    const folder = built.providerEvidence[index]?.folder;
+    const reasons = [...entry.contradictions];
+    if (entry.rejected && !reasons.length) reasons.push(entry.reason || "identity");
+    if (!folder?.plausible) reasons.push("release-folder");
+    if (folder?.artistContradicted || folder?.ambiguousTitleAlbumArtist) reasons.push("artist");
+    if (isDeniedSoulseekFile(entry.candidate.raw, searchOptions?.deniedSourceKeys))
+      reasons.push("previously-rejected");
+    return { ...entry, reasons };
+  });
+  const prefiltered = assessed
+    .filter((entry) => !entry.reasons.length)
     .map((entry) => entry.candidate);
   const eligible = orderAdvertisedQualityCandidates(prefiltered, {
     profile: searchOptions?.qualityProfile || getQualityProfile(),
@@ -287,7 +303,43 @@ export function hasSlskdSearchCandidates(
     readName: (entry) => entry?.raw?.file,
     readBitrate: (entry) => entry?.raw?.bitrate ?? entry?.raw?.bitRate,
   });
-  return eligible.length >= MIN_SEARCH_CANDIDATES;
+  const eligibleSet = new Set(eligible);
+  const rejected = assessed.flatMap((entry) => {
+    const reasons = entry.reasons.length
+      ? entry.reasons
+      : eligibleSet.has(entry.candidate)
+        ? []
+        : ["quality"];
+    return reasons.length ? [{ file: entry.candidate.raw.file, reasons }] : [];
+  });
+  return { eligible, rejected };
+}
+
+function logSlskdSearchResults(
+  jobId: string,
+  query: string,
+  results: SoulseekSearchItem[],
+  resolvedTrack: SearchTrackRequest,
+  searchOptions: SlskdSearchOptions,
+  cached: boolean,
+) {
+  if (searchOptions.albumJobs) return;
+  const assessment = assessSlskdTrackResults(results, resolvedTrack, searchOptions);
+  const rejectedByReason: Record<string, number> = {};
+  for (const entry of assessment.rejected) {
+    for (const reason of new Set(entry.reasons)) {
+      rejectedByReason[reason] = (rejectedByReason[reason] || 0) + 1;
+    }
+  }
+  logger.info("slskd", "Soulseek search query assessed", {
+    jobId,
+    query,
+    cached,
+    resultCount: results.length,
+    eligibleCount: assessment.eligible.length,
+    rejectedByReason,
+    rejectedExamples: assessment.rejected.slice(0, 5),
+  });
 }
 
 async function getWorkerSearchOptions() {
@@ -963,6 +1015,14 @@ async function advanceSlskdSearch(
     searchMonitors.delete(activeSearch.id);
     const results = slskdClient.flattenSearchResults(result.data);
     cacheSearchResults("slskd", activeSearch.query, results);
+    logSlskdSearchResults(
+      payload.jobId,
+      activeSearch.query,
+      results,
+      resolvedTrack,
+      searchOptions,
+      false,
+    );
     mergeSearchResults(aggregated, seen, results, searchResultKey);
     index += 1;
   }
@@ -972,6 +1032,7 @@ async function advanceSlskdSearch(
     if (query === undefined) break;
     const cached = getCachedSearchResults("slskd", query);
     if (cached) {
+      logSlskdSearchResults(payload.jobId, query, cached, resolvedTrack, searchOptions, true);
       mergeSearchResults(aggregated, seen, cached, searchResultKey);
       index += 1;
       continue;

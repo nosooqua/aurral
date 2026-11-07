@@ -8,7 +8,13 @@ import {
   stripPromoDescriptors,
 } from "./semanticPolicy.ts";
 import { foldDiacritics } from "../providers/brainzmashRanking.ts";
-import { discFolderNumber, isVariousArtistsCredit, withoutFeaturedArtists } from "./titleText.ts";
+import {
+  coreTrackTitle,
+  discFolderNumber,
+  isVariousArtistsCredit,
+  normalizeTitleTypography,
+  withoutFeaturedArtists,
+} from "./titleText.ts";
 import { implausibleBitrateKbps } from "./candidateNormalizer.ts";
 import type { NameList, ReleaseTrack } from "./semanticPolicy.ts";
 import { UUID_REGEX } from "../../../lib/uuid.ts";
@@ -48,6 +54,13 @@ export function readRecordingMbid(value: unknown) {
   return UUID_REGEX.test(id) ? id : null;
 }
 
+export function readIsrc(value: unknown) {
+  const code = String(value || "")
+    .replace(/[-\s]/gu, "")
+    .toUpperCase();
+  return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/u.test(code) ? code : null;
+}
+
 type RecordingRequest = {
   title?: string | null;
   albumName?: string | null;
@@ -65,6 +78,8 @@ type RecordingRequest = {
   recordingMbid?: unknown;
   recording_mbid?: unknown;
   recordingMbidAliases?: NameList;
+  isrc?: unknown;
+  isrcs?: unknown[];
 };
 
 type RecordingCandidate = {
@@ -79,6 +94,8 @@ type RecordingCandidate = {
   directoryPath?: string | null;
   recordingMbid?: unknown;
   recording_mbid?: unknown;
+  isrc?: unknown;
+  isrcs?: unknown[];
   durationMs?: unknown;
   duration_ms?: unknown;
   sizeBytes?: unknown;
@@ -87,7 +104,7 @@ type RecordingCandidate = {
 };
 
 export function normalizeMatchText(value: string | null | undefined) {
-  return foldDiacritics(String(value || "").normalize("NFKD"))
+  return foldDiacritics(normalizeTitleTypography(value).replace(/ё/giu, "е").normalize("NFKD"))
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\p{M}]+/gu, " ")
     .trim()
@@ -165,7 +182,7 @@ const VARIANTS = [
 ];
 
 function variants(title: string | null | undefined) {
-  const normalized = normalizeMatchText(title);
+  const normalized = normalizeMatchText(title).replace(/\brmx\b/gu, "remix");
   const found = VARIANTS.filter((variant) => new RegExp(`\\b${variant}\\b`, "u").test(normalized));
   const mix = /\b(extended|radio|club|dance|single|album) mix\b/u.exec(normalized);
   if (mix) found.push(`${mix[1]}-mix`);
@@ -173,18 +190,7 @@ function variants(title: string | null | undefined) {
 }
 
 function coreMatchTitle(title: string | null | undefined) {
-  return withoutFeaturedArtists(
-    (stripPromoDescriptors(title) || String(title || ""))
-      .replace(
-        /\s*[[(][^\])]*\b(?:live|remix|acoustic|instrumental|demo|edit|karaoke|cover|nightcore|mix|mono|stereo|remaster(?:ed)?|feat\.?|ft\.?|featuring|official audio|official video|visualizer|lyrics|album version|original version|bonus|hidden track)\b[^\])]*[\])]/giu,
-        "",
-      )
-      .replace(
-        /\s+[-–—]\s+(?:(?:radio|extended|club|dance|single|album)\s+)?(?:edit|mix|live|remix|acoustic|instrumental|demo|karaoke|remaster(?:ed)?)\b.*$/iu,
-        "",
-      )
-      .replace(/\s+[-–—]\s+(?:mono|stereo)(?:\s+(?:version|mix))?\s*$/iu, ""),
-  );
+  return withoutFeaturedArtists(coreTrackTitle(stripPromoDescriptors(title) || title));
 }
 
 function coreArtist(name: string | null | undefined) {
@@ -299,8 +305,8 @@ function variantContradictions(
   ).contradictions;
 }
 
-// The shared policy accepts an undeclared copy of a requested edit or mix
-// and does not know a bare "(Edit)" or a radio, dance, single, or album mix.
+// Bare edits and radio, dance, single, or album mixes need more specific
+// checks than the shared version families provide.
 const EDIT_VARIANTS = new Set(["edit", "remix"]);
 
 function editContradiction(
@@ -344,6 +350,10 @@ export function compareRecording(
   const requestId = requestIds[0] || "";
   const candidateId = readRecordingMbid(candidate.recordingMbid || candidate.recording_mbid) || "";
   const sameRecording = Boolean(candidateId) && requestIds.includes(candidateId);
+  const requestedIsrcs = [request.isrc, ...(request.isrcs || [])].map(readIsrc).filter(Boolean);
+  const sameIsrc = [candidate.isrc, ...(candidate.isrcs || [])]
+    .map(readIsrc)
+    .some((isrc) => isrc !== null && requestedIsrcs.includes(isrc));
   if (requestId && candidateId && !sameRecording) contradictions.push("recording-mbid");
   const offeredTitle = [candidate.versionTitle || candidate.title, candidate.fileNameTitle]
     .filter(Boolean)
@@ -380,6 +390,9 @@ export function compareRecording(
     contradictions.push("artist");
   const evidence = [];
   if (sameRecording) evidence.push("recording-mbid");
+  // ISRC is supporting evidence only: reused or mistagged codes must never
+  // override a title, version, performer, or duration contradiction.
+  if (sameIsrc) evidence.push("isrc");
   if (title >= policy.minTitleSimilarity) evidence.push("title");
   if (artist != null && artist >= policy.minArtistSimilarity) evidence.push("artist");
   if (gap != null && gap <= policy.maxDurationGapMs) evidence.push("duration");

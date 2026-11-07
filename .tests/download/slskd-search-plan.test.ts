@@ -93,3 +93,32 @@ test("Soulseek early exit ignores denied files and blacklisted peers", () => {
   const permitted = results.map((entry) => ({ ...entry, user: `allowed-${entry.user}` }));
   assert.equal(hasSlskdSearchCandidates([...results, ...permitted], fataTrack, options), true);
 });
+
+test("Soulseek early exit requires the requested remix and remixer", () => {
+  const request = {
+    artistName: "Abor & Tynna",
+    albumName: "Bittersüß (Baller Deluxe)",
+    trackName: "Baller - nowifi Remix",
+    durationMs: 200000,
+  };
+  const resultsFor = (title: string) =>
+    Array.from({ length: 3 }, (_, index) => ({
+      user: `remix-peer-${index}`,
+      file: `Music/Abor & Tynna/Bittersüß (Baller Deluxe)/25 - Abor & Tynna - ${title}.flac`,
+      size: 30000000,
+      length: 200,
+    }));
+  assert.equal(hasSlskdSearchCandidates(resultsFor("Baller"), request, {}), false);
+  assert.equal(hasSlskdSearchCandidates(resultsFor("Baller (Another Remix)"), request, {}), false);
+  assert.equal(hasSlskdSearchCandidates(resultsFor("Baller (nowifi Remix)"), request, {}), true);
+});
+
+test("Soulseek early exit ignores an artist contradiction even in the named album", () => {
+  const results = Array.from({ length: 3 }, (_, index) => ({
+    user: `other-artist-${index}`,
+    file: "Music/Another Band/The Fiction We Live/01 Another Band - The After Dinner Payback.flac",
+    size: 30000000,
+    length: 200,
+  }));
+  assert.equal(hasSlskdSearchCandidates(results, fataTrack, {}), false);
+});

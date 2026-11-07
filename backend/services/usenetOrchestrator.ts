@@ -12,7 +12,7 @@ import {
 import { prowlarrClient } from "./prowlarrClient.ts";
 import { getUsenetClient } from "./download/downloadClientSettings.ts";
 import { usenetReleaseIdentity } from "./sabnzbdClient.ts";
-import { logger } from "./logger.ts";
+import { logger, safeLogDiagnostic } from "./logger.ts";
 import {
   buildUsenetSearchQueries,
   isAudioFile,
@@ -458,6 +458,7 @@ async function advanceUsenetSearch(
   queries: string[],
   enough: (results: UsenetRelease[]) => boolean,
   runQuery: (query: string) => Promise<UsenetRelease[]>,
+  reportQuery: (query: string, results: UsenetRelease[], cached: boolean) => void,
 ) {
   const aggregated: UsenetRelease[] = [];
   const seen = new Set();
@@ -479,13 +480,14 @@ async function advanceUsenetSearch(
     const query = queries[index];
     if (query === undefined) break;
     let releases = getCachedSearchResults("usenet", query);
+    const cached = Boolean(releases);
     if (!releases) {
       searched = true;
       try {
         releases = await runQuery(query);
         cacheSearchResults("usenet", query, releases);
       } catch (error) {
-        searchError = asAppError(error)?.message || String(error);
+        searchError = safeLogDiagnostic(error).replace(/https?:\/\/\S+/gu, "[URL]");
         logger.warn("usenet", "Prowlarr search failed", {
           jobId: payload.jobId,
           query,
@@ -495,6 +497,7 @@ async function advanceUsenetSearch(
         cacheSearchResults("usenet", query, releases);
       }
     }
+    reportQuery(query, releases, cached);
     mergeSearchResults(aggregated, seen, releases, releaseKey);
     index += 1;
   }
@@ -561,6 +564,34 @@ async function handleUsenetSearch(payload: UsenetPayload, helpers: PipelineHelpe
         albumGrab,
       ).length >= MIN_USENET_CANDIDATES,
     runQuery,
+    (query, results, cached) => {
+      const ranked = rankUsenetReleases(results, searchContext);
+      const rejected = ranked.flatMap((entry) => {
+        const reasons = [...entry.rejectionReasons];
+        if (deniedReleases.has(usenetReleaseIdentity(entry.raw.guid))) reasons.push("denied");
+        if (albumGrab && !entry.resolvedAlbumName) reasons.push("album");
+        if (
+          entry.releaseAdmissible &&
+          (!albumGrab || entry.resolvedAlbumName) &&
+          !orderCandidates([entry], qualityOptions, albumGrab).length
+        )
+          reasons.push("quality");
+        return reasons.length ? [{ title: entry.raw.file, reasons }] : [];
+      });
+      logger.debug("usenet", "Search query evaluated", {
+        jobId: payload.jobId,
+        query,
+        cached,
+        resultCount: results.length,
+        candidateCount: orderCandidates(
+          rankUsenetReleases(allowed(results), searchContext),
+          qualityOptions,
+          albumGrab,
+        ).length,
+        rejectedCount: rejected.length,
+        rejected: rejected.slice(0, 20),
+      });
+    },
   );
   if (!isPipelinePayloadActive(payload)) return null;
   if (step.payload) return step.payload;
